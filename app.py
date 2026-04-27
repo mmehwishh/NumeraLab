@@ -237,6 +237,9 @@ from labs.lab1_root_finding  import render_lab1
 from labs.lab2_interpolation import render_lab2
 from labs.lab3_integration   import render_lab3
 from labs.lab4_differential  import render_lab4
+# from utils.helpers import show_function_guide
+# with st.expander("📐 Function Input Guide"):
+#     show_function_guide()
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -264,7 +267,12 @@ with st.sidebar:
         "📈  Lab 4 · Diff. Equations"       : "lab4",
     }
 
-    selected_label = st.radio("", list(lab_options.keys()), label_visibility="collapsed")
+    # Provide a descriptive name like "Select Lab" or "Options"
+    selected_label = st.radio(
+        "Select an option", 
+        list(lab_options.keys()), 
+        label_visibility="collapsed"
+    )
     selected_lab   = lab_options[selected_label]
 
     st.markdown("<hr style='margin:0.8rem 0;'>", unsafe_allow_html=True)
@@ -358,7 +366,7 @@ if selected_lab == "home":
             "methods": ["Euler Method", "Modified Euler", "Heun's Method"],
             "color": "#10b981",
             "bg": "rgba(16,185,129,0.07)",
-        },
+        }
     ]
 
     cols = st.columns(2, gap="large")

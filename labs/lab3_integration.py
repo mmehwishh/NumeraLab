@@ -12,7 +12,7 @@ import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from utils.helpers import parse_function
+from utils.helpers import parse_function, show_function_guide
 
 
 # ── Shared dark style ─────────────────────────────────────────────────────────
@@ -255,10 +255,13 @@ def render_lab3():
     st.markdown("#### ⚙️ Common Settings")
     col1, col2, col3, col4 = st.columns(4)
     func_str = col1.text_input("f(x) =", value="x**2",
-                                help="Examples: sin(x), exp(-x), x**3 + 2*x")
+                                help="e.g. sin(x), 2/(x-4), ln(x), e^x, sqrt(x), x^2+3x")
     a_val    = col2.number_input("Lower limit a", value=0.0)
     b_val    = col3.number_input("Upper limit b", value=1.0)
     n_val    = col4.number_input("Subintervals n", value=10, min_value=2, step=2)
+
+    with st.expander("📐 Function syntax guide — kya likh sakte hain?", expanded=False):
+        show_function_guide()
 
     st.markdown("<hr style='border-color:#1e3a5f;margin:1rem 0;'>", unsafe_allow_html=True)
 
@@ -289,7 +292,7 @@ def render_lab3():
         if st.button("▶  Run Trapezoidal", key="run_trap", use_container_width=True):
             func, err = parse_function(func_str)
             if err:
-                st.error(f"Function parse error: {err}")
+                st.error(f"❌ Parse error: {err}")
             elif a_val >= b_val:
                 st.error("b > a hona chahiye!")
             else:
@@ -337,7 +340,7 @@ def render_lab3():
         if st.button("▶  Run Simpson's", key="run_simp", use_container_width=True):
             func, err = parse_function(func_str)
             if err:
-                st.error(f"Function parse error: {err}")
+                st.error(f"❌ Parse error: {err}")
             elif a_val >= b_val:
                 st.error("b > a hona chahiye!")
             else:
@@ -394,7 +397,7 @@ def render_lab3():
         if st.button("▶  Run Midpoint", key="run_mid", use_container_width=True):
             func, err = parse_function(func_str)
             if err:
-                st.error(f"Function parse error: {err}")
+                st.error(f"❌ Parse error: {err}")
             elif a_val >= b_val:
                 st.error("b > a hona chahiye!")
             else:
@@ -429,7 +432,7 @@ def render_lab3():
         if st.button("▶  Run Comparison", key="run_cmp", use_container_width=True):
             func, err = parse_function(func_str)
             if err:
-                st.error(f"Function parse error: {err}")
+                st.error(f"❌ Parse error: {err}")
             elif a_val >= b_val:
                 st.error("b > a hona chahiye!")
             else:
