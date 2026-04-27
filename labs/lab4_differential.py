@@ -10,11 +10,11 @@ Main UI function:
   render_lab4()
 
 TODO list:
-  - [ ] euler_method() implement karo
-  - [ ] modified_euler() implement karo
-  - [ ] heuns_method() implement karo
-  - [ ] render_lab4() UI complete karo
-  - [ ] Solution curve plot karo
+  - [ ] euler_method() implement 
+  - [ ] modified_euler() implement 
+  - [ ] heuns_method() implement 
+  - [ ] render_lab4() UI complete 
+  - [ ] Solution curve plot 
 """
 
 import numpy as np
@@ -51,8 +51,8 @@ def euler_method(func, x0: float, y0: float, x_end: float, h: float):
         3. Har step ka dict: {'x': x, 'y': y, 'f(x,y)': func(x,y), 'y_next': y_next}
         4. Return (x_vals, y_vals, table)
     """
-    # TODO: Apna code yahan likhna hai
-    raise NotImplementedError("euler_method() implement karo!")
+    # TODO: implemnnet code here
+    raise NotImplementedError("euler_method() implement !")
 
 
 # ─────────────────────────────────────────────
@@ -95,7 +95,7 @@ def heuns_method(func, x0: float, y0: float, x_end: float, h: float):
 
     TODO:
         PREDICTOR step:
-              y_pred = y + h * f(x, y)       (Euler se predict karo)
+              y_pred = y + h * f(x, y)       (predict from eular)
 
         CORRECTOR step:
               y_next = y + (h/2) * [f(x, y) + f(x+h, y_pred)]
@@ -129,19 +129,16 @@ def render_lab4():
     Lab 4 Streamlit UI.
 
     TODO:
-        1. Method select karo
-        2. ODE string input lo (e.g. "x + y", "x*y")
-           (dy/dx = ??? format mein)
-        3. x0, y0 (initial conditions) input lo
-        4. x_end (final x) aur h (step size) input lo
-        5. Calculate par:
-              - parse_ode() se function parse karo
-              - Method call karo
-              - Results table display karo (x, y columns)
-              - plot_ode_solution() se curve dikhao
+       ODE Solver WorkflowS
+       elect Method (Choose the numerical integration method)
+       Input Parameters (Final $x$ value ($x_{end}$) and step size ($h$))
+       On 'Calculate' Click:
+       Parse Function: Convert the ODE string into a callable function using parse_ode()
+       Execute Method: Call the selected numerical solver.
+       Display Results: Show a table with $x$ and $y$ columns.
     """
     st.header("📈 Lab 4: Differential Equations")
-    st.markdown("First-order ODE **dy/dx = f(x,y)** numerically solve karo.")
+    st.markdown("First-order ODE **dy/dx = f(x,y)** numerically solve .")
 
     # TODO: UI yahan add karo
-    st.info("⚙️ UI implementation pending - TODO comments follow karo!")
+    st.info("⚙️ UI implementation pending !")

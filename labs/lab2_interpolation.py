@@ -10,10 +10,10 @@ Main UI function:
   render_lab2()
 
 TODO list:
-  - [ ] lagrange_interpolation() implement karo
-  - [ ] newton_forward_difference() implement karo
-  - [ ] newton_divided_difference() implement karo
-  - [ ] render_lab2() UI complete karo
+  - [ ] lagrange_interpolation() implement 
+  - [ ] newton_forward_difference() implement 
+  - [ ] newton_divided_difference() implement 
+  - [ ] render_lab2() UI complete 
 """
 
 import numpy as np
@@ -84,7 +84,7 @@ def newton_forward_difference(x_points: list, y_points: list, x_query: float):
 def newton_divided_difference(x_points: list, y_points: list, x_query: float):
     """
     Newton's Divided Difference Interpolation.
-    (Unequally spaced data ke liye bhi kaam karta hai)
+    (Unequally spaced data work too)
 
     Parameters:
         x_points : list of float
@@ -106,7 +106,7 @@ def newton_divided_difference(x_points: list, y_points: list, x_query: float):
         4. Return (result, div_table)
     """
     # TODO: Apna code yahan likhna hai
-    raise NotImplementedError("newton_divided_difference() implement karo!")
+    raise NotImplementedError("newton_divided_difference() do implement !")
 
 
 # ─────────────────────────────────────────────
@@ -117,19 +117,27 @@ def render_lab2():
     Lab 2 Streamlit UI.
 
     TODO:
-        1. Method select karo (Lagrange / Newton Forward / Newton Divided)
-        2. Data points input karo - st.text_area se comma separated values
-           e.g. x_points: "1, 2, 3, 4"
-                y_points: "1, 4, 9, 16"
-        3. x_query input karo (kahan interpolate karna hai)
-        4. Calculate button par:
-              - string ko list mein convert karo
-              - Method call karo
-              - Result display karo
-              - Table aur graph dikhao
+        Interpolation App Workflow
+Select Method (Lagrange / Newton Forward / Newton Divided)
+
+Input Data Points Use st.text_area for comma-separated values.
+
+Example: x_points: "1, 2, 3, 4"
+
+y_points: "1, 4, 9, 16"
+
+Input x_query (The point where you want to interpolate)
+
+On 'Calculate' Button Click: * Parse Input: Convert the strings into numerical lists.
+
+Call Function: Execute the selected interpolation method.
+
+Display Result: Show the calculated value.
+
+Visualize: Display the difference table and the resulting graph.
     """
     st.header("📐 Lab 2: Interpolation Methods")
     st.markdown("Known data points se unknown values estimate karo.")
 
     # TODO: UI yahan add karo
-    st.info("⚙️ UI implementation pending - TODO comments follow karo!")
+    st.info("⚙️ UI implementation pending ")
