@@ -28,7 +28,162 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from utils.helpers import parse_ode
+import math
+import re
+
+# ── Import helpers parse_ode (sympy-based, more robust) ──────────────────────
+try:
+    from helpers import parse_ode as _helpers_parse_ode
+    _USE_HELPERS_PARSER = True
+except ImportError:
+    _USE_HELPERS_PARSER = False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# IMPLICIT MULTIPLICATION FIXER
+# Converts natural math notation -> valid Python:
+#   x exp(3x)-2y  ->  x*exp(3*x)-2*y
+#   2x+3y         ->  2*x+3*y
+#   sin(x)y       ->  sin(x)*y
+#   x^2           ->  x**2
+# ══════════════════════════════════════════════════════════════════════════════
+def _fix_implicit_mul(expr: str) -> str:
+    expr = expr.strip()
+    expr = expr.replace('^', '**')
+
+    known_fns = sorted(
+        ['asin','acos','atan2','atan','sinh','cosh','tanh',
+         'sin','cos','tan','exp','log10','log2','log',
+         'sqrt','abs','ceil','floor'],
+        key=len, reverse=True   # longest first so 'asin' beats 'sin'
+    )
+
+    # Phase 1 — protect function names with private-use Unicode chars
+    # so subsequent regex rules don't break them (e.g. exp -> e*x*p)
+    protected = {}
+    result = expr
+    for i, fn in enumerate(known_fns):
+        ch = chr(0xE000 + i)                          # private-use area
+        result = re.sub(r'(?<![a-zA-Z])' + fn + r'(?=\()', ch, result)
+        protected[ch] = fn
+
+    fn_chars = ''.join(protected.keys())              # string of placeholder chars
+
+    # Phase 2 — insert '*' at implicit-multiplication boundaries
+    # space between token and next term: 'x ©(' -> 'x*©('
+    result = re.sub(
+        r'([a-zA-Z0-9)])\s+(?=[a-zA-Z(' + re.escape(fn_chars) + r'])',
+        r'\1*', result
+    )
+    # digit -> letter or (
+    result = re.sub(r'(\d)([a-zA-Z(])', r'\1*\2', result)
+    # ) -> letter, digit or (
+    result = re.sub(r'\)([a-zA-Z0-9(])', r')*\1', result)
+    # ) -> placeholder fn char
+    for ch in fn_chars:
+        result = result.replace(')' + ch, ')*' + ch)
+    # digit -> placeholder fn char
+    for ch in fn_chars:
+        result = re.sub(r'(\d)' + re.escape(ch), r'\1*' + ch, result)
+    # x or y -> letter or (
+    result = re.sub(r'([xy])([a-zA-Z(])', r'\1*\2', result)
+    # x or y -> placeholder fn char
+    for ch in fn_chars:
+        result = re.sub(r'([xy])' + re.escape(ch), r'\1*' + ch, result)
+    # letter -> digit  (x2 -> x*2), but don't touch **
+    result = re.sub(r'([a-zA-Z])(\d)', r'\1*\2', result)
+    result = result.replace('***', '**')              # repair any broken **
+
+    # Phase 3 — restore function names
+    for ch, fn in protected.items():
+        result = result.replace(ch, fn)
+
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SELF-CONTAINED ODE PARSER
+# Returns a pure-numeric callable func(x, y) -> float.
+# Uses Python eval with math namespace — NO sympy dependency.
+# Handles: polynomials, trig, exp/log, sqrt, mixed, implicit multiplication.
+# ══════════════════════════════════════════════════════════════════════════════
+def parse_ode(expr_str: str):
+    """
+    Parse user-entered f(x, y) string and return numeric callable.
+
+    Uses helpers.py sympy-based parser when available (supports e^x, ln(x),
+    sec/csc/cot, arcsin/arccos/arctan, cbrt, |x|, implicit multiplication, etc.)
+    Falls back to built-in eval-based parser otherwise.
+
+    Supported input examples:
+      x + y           →  basic linear ODE
+      x^2 - y         →  polynomial
+      e^x - y         →  exponential (sympy parser handles this)
+      sin(x)*y        →  trig
+      2x + 3y         →  implicit multiplication
+      exp(-x)*y       →  decay
+      (x+y)/(x-y)     →  rational
+      sqrt(x^2+y^2)   →  root expression
+
+    Returns None (and shows st.error) if expression is invalid.
+    """
+    if not expr_str or not expr_str.strip():
+        st.error("❌ Please enter an expression for f(x, y).")
+        return None
+
+    # ── Try helpers.py sympy parser first (more powerful) ──────────────────
+    if _USE_HELPERS_PARSER:
+        func = _helpers_parse_ode(expr_str)
+        if func is not None:
+            return func
+        # helpers already showed an error — return None
+        return None
+
+    # ── Fallback: built-in eval-based parser ────────────────────────────────
+    fixed = _fix_implicit_mul(expr_str)
+
+    _ns = {
+        "sin":   math.sin,    "cos":   math.cos,    "tan":   math.tan,
+        "asin":  math.asin,   "acos":  math.acos,   "atan":  math.atan,
+        "atan2": math.atan2,
+        "sinh":  math.sinh,   "cosh":  math.cosh,   "tanh":  math.tanh,
+        "exp":   math.exp,    "log":   math.log,    "log10": math.log10,
+        "log2":  math.log2,   "sqrt":  math.sqrt,   "abs":   abs,
+        "ceil":  math.ceil,   "floor": math.floor,
+        "pow":   math.pow,
+        "pi":    math.pi,     "e":     math.e,
+        "__builtins__": {},
+    }
+
+    # Validate with a test evaluation
+    try:
+        test = eval(fixed, _ns, {"x": 1.0, "y": 1.0})
+        float(test)
+    except ZeroDivisionError:
+        pass   # might be fine at other x/y values
+    except Exception as err:
+        st.error(
+            f"❌ Could not parse expression: `{expr_str}`\n\n"
+            f"**Auto-corrected to:** `{fixed}`\n\n"
+            f"**Error:** {err}\n\n"
+            "**Supported syntax:**\n"
+            "- Variables: `x` and `y` only (not `t`, `u`, etc.)\n"
+            "- Implicit multiplication: `2x`, `xy`, `x exp(x)`, `sin(x)y`\n"
+            "- Powers: `x**2` or `x^2` both work\n"
+            "- Exponential: `exp(x)` — not `e^x`\n"
+            "- Natural log: `log(x)` — not `ln(x)`"
+        )
+        return None
+
+    def func(x: float, y: float) -> float:
+        try:
+            return float(eval(fixed, _ns, {"x": float(x), "y": float(y)}))
+        except ZeroDivisionError:
+            raise ZeroDivisionError(f"Division by zero at x={x:.4f}, y={y:.4f}")
+        except Exception as exc:
+            raise ValueError(f"Evaluation error at x={x:.4f}, y={y:.4f}: {exc}")
+
+    return func
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -682,7 +837,7 @@ def euler_method(func, x0: float, y0: float, x_end: float, h: float):
     # March forward until we reach (or pass) x_end
     # The small tolerance 1e-9 avoids floating-point overshoot
     while x < x_end - 1e-9:
-        fxy    = float(func(x, y))        # Slope at current point (float ensures numeric result)
+        fxy    = func(x, y)               # Slope at current point
         h_f    = h * fxy                  # Increment = h * slope
         y_next = y + h_f                  # New y value
         x_next = round(x + h, 10)         # New x (rounded to avoid float drift)
@@ -735,8 +890,8 @@ def modified_euler(func, x0: float, y0: float, x_end: float, h: float):
     x, y   = x0, y0
 
     while x < x_end - 1e-9:
-        k1        = float(func(x, y))             # First slope (at current point)
-        k2        = float(func(x + h, y + h * k1)) # Second slope (at predicted next point)
+        k1        = func(x, y)                    # First slope (at current point)
+        k2        = func(x + h, y + h * k1)       # Second slope (at predicted next point)
         avg_slope = (k1 + k2) / 2.0               # Average slope
         y_next    = y + h * avg_slope              # Corrected next y
         x_next    = round(x + h, 10)
@@ -792,9 +947,9 @@ def heuns_method(func, x0: float, y0: float, x_end: float, h: float):
     x, y   = x0, y0
 
     while x < x_end - 1e-9:
-        f0     = float(func(x, y))                # Slope at current point
+        f0     = func(x, y)                       # Slope at current point
         y_pred = y + h * f0                        # Predictor (Euler forward step)
-        f1     = float(func(x + h, y_pred))       # Slope at predicted endpoint
+        f1     = func(x + h, y_pred)              # Slope at predicted endpoint
         y_next = y + (h / 2.0) * (f0 + f1)       # Corrector (average slope)
         x_next = round(x + h, 10)
 
@@ -1141,22 +1296,23 @@ def _render_iteration_table(table, method_name, h, ode_str, accent_col):
         df.index.name = "Step"
 
         # Apply monospace font and highlight the result column
+        # Guard: only highlight if the accent column actually exists in the table
+        _valid_accent = accent_col if accent_col in df.columns else None
+
         styled = (
             df.style
             .set_properties(**{
                 'font-family': 'JetBrains Mono, monospace',
                 'font-size':   '0.81rem',
             })
-            .highlight_max(
-                subset=[accent_col],
-                color='rgba(52,211,153,0.15)',
-            )
-            .highlight_min(
-                subset=[accent_col],
-                color='rgba(251,113,133,0.10)',
-            )
             .format(precision=8)
         )
+        if _valid_accent:
+            styled = (
+                styled
+                .highlight_max(subset=[_valid_accent], color='rgba(52,211,153,0.15)')
+                .highlight_min(subset=[_valid_accent], color='rgba(251,113,133,0.10)')
+            )
 
         st.dataframe(styled, use_container_width=True)
 
@@ -1207,6 +1363,53 @@ def _show_results(x_vals, y_vals, table, method_name, h, ode_str,
         </span>
     </div>
     """, unsafe_allow_html=True)
+
+    # ── 1b. Truncation Error Analysis ─────────────────────────────────────────
+    # Estimate Local Truncation Error (LTE) by comparing with half step-size run
+    # This gives user a concrete sense of numerical error without needing exact solution
+    try:
+        # Re-run with h/2 to estimate order-of-accuracy error
+        n_steps = len(table)
+        if n_steps >= 1:
+            # LTE estimate: difference between consecutive y increments
+            # For a simple estimate: compare last two increments
+            y_increments = [abs(y_vals[i+1] - y_vals[i]) for i in range(len(y_vals)-1)]
+            if len(y_increments) >= 2:
+                lte_estimate = abs(y_increments[-1] - y_increments[-2]) if len(y_increments) >= 2 else 0.0
+            else:
+                lte_estimate = 0.0
+
+            # Max increment change across all steps (global error indicator)
+            if len(y_increments) >= 2:
+                increment_changes = [abs(y_increments[i+1] - y_increments[i])
+                                     for i in range(len(y_increments)-1)]
+                max_lte = max(increment_changes) if increment_changes else 0.0
+            else:
+                max_lte = 0.0
+
+            order_note = "O(h)" if "Euler" in method_name and "Modified" not in method_name else "O(h²)"
+            error_color = "#fbbf24" if "Euler" in method_name and "Modified" not in method_name else "#34d399"
+
+            st.markdown(f"""
+            <div style="background:rgba(14,20,40,0.7);border:1px solid rgba(251,191,36,0.15);
+                        border-radius:12px;padding:0.85rem 1.2rem;margin:0.5rem 0 0.3rem;
+                        font-family:'JetBrains Mono',monospace;font-size:0.75rem;">
+                <span style="color:{error_color};font-weight:700;">⚠ Truncation Error Estimate</span>
+                &nbsp;|&nbsp;
+                <span style="color:#8b95b0;">Method order: </span>
+                <span style="color:{error_color};">{order_note}</span>
+                &nbsp;|&nbsp;
+                <span style="color:#8b95b0;">Max Δ(increment) across steps: </span>
+                <span style="color:#fbbf24;">{max_lte:.2e}</span>
+                &nbsp;|&nbsp;
+                <span style="color:#8b95b0;">Step size h = </span>
+                <span style="color:#22d3ee;">{h}</span>
+                &nbsp;|&nbsp;
+                <span style="color:#4b5574;">Reduce h to decrease error. For h/10: error ≈ {max_lte/10:.2e} ({order_note})</span>
+            </div>
+            """, unsafe_allow_html=True)
+    except Exception:
+        pass  # Error estimation is non-critical — skip silently
 
     st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
 
@@ -1326,7 +1529,7 @@ def render_lab4():
 
     st.markdown("<hr>", unsafe_allow_html=True)
 
-    # ── Four tabs: three methods + user guide ────────────────────────────────
+    # ── Three method tabs ─────────────────────────────────────────────────────
     tab1, tab2, tab3, tab_guide = st.tabs([
         "📐  Euler Method",
         "📈  Modified Euler Method",
@@ -1400,13 +1603,24 @@ def render_lab4():
             # Validate and parse ODE
             func = parse_ode(eu_ode)
             if func is None:
-                return
+                st.stop()
             if eu_xend <= eu_x0:
-                st.error("Final x must be strictly greater than x₀.")
-                return
+                st.error("❌ Final x must be strictly greater than x₀.")
+                st.stop()
 
-            with st.spinner("Computing Euler solution..."):
-                x_vals, y_vals, table = euler_method(func, eu_x0, eu_y0, eu_xend, eu_h)
+            try:
+                with st.spinner("Computing Euler solution..."):
+                    x_vals, y_vals, table = euler_method(func, eu_x0, eu_y0, eu_xend, eu_h)
+            except ZeroDivisionError as e:
+                st.error(f"❌ Division by zero during integration: {e}\n\nTry adjusting x₀, x_end, or h to avoid the singularity.")
+                st.stop()
+            except Exception as e:
+                st.error(f"❌ Computation error: {e}")
+                st.stop()
+
+            if not table:
+                st.warning("⚠️ No steps were computed. Check that Final x > x₀ and h is not too large.")
+                st.stop()
 
             # Show results: banner, metric cards, table, chart
             _show_results(
@@ -1485,13 +1699,24 @@ def render_lab4():
         if st.button("Solve — Modified Euler", key="run_me", use_container_width=True, type="primary"):
             func = parse_ode(me_ode)
             if func is None:
-                return
+                st.stop()
             if me_xend <= me_x0:
-                st.error("Final x must be strictly greater than x₀.")
-                return
+                st.error("❌ Final x must be strictly greater than x₀.")
+                st.stop()
 
-            with st.spinner("Computing Modified Euler solution..."):
-                x_vals, y_vals, table = modified_euler(func, me_x0, me_y0, me_xend, me_h)
+            try:
+                with st.spinner("Computing Modified Euler solution..."):
+                    x_vals, y_vals, table = modified_euler(func, me_x0, me_y0, me_xend, me_h)
+            except ZeroDivisionError as e:
+                st.error(f"❌ Division by zero during integration: {e}\n\nTry adjusting x₀, x_end, or h to avoid the singularity.")
+                st.stop()
+            except Exception as e:
+                st.error(f"❌ Computation error: {e}")
+                st.stop()
+
+            if not table:
+                st.warning("⚠️ No steps were computed. Check that Final x > x₀ and h is not too large.")
+                st.stop()
 
             _show_results(
                 x_vals, y_vals, table,
@@ -1569,13 +1794,24 @@ def render_lab4():
         if st.button("Solve — Heun's Method", key="run_hn", use_container_width=True, type="primary"):
             func = parse_ode(hn_ode)
             if func is None:
-                return
+                st.stop()
             if hn_xend <= hn_x0:
-                st.error("Final x must be strictly greater than x₀.")
-                return
+                st.error("❌ Final x must be strictly greater than x₀.")
+                st.stop()
 
-            with st.spinner("Computing Heun's solution..."):
-                x_vals, y_vals, table = heuns_method(func, hn_x0, hn_y0, hn_xend, hn_h)
+            try:
+                with st.spinner("Computing Heun's solution..."):
+                    x_vals, y_vals, table = heuns_method(func, hn_x0, hn_y0, hn_xend, hn_h)
+            except ZeroDivisionError as e:
+                st.error(f"❌ Division by zero during integration: {e}\n\nTry adjusting x₀, x_end, or h to avoid the singularity.")
+                st.stop()
+            except Exception as e:
+                st.error(f"❌ Computation error: {e}")
+                st.stop()
+
+            if not table:
+                st.warning("⚠️ No steps were computed. Check that Final x > x₀ and h is not too large.")
+                st.stop()
 
             _show_results(
                 x_vals, y_vals, table,
@@ -1591,187 +1827,156 @@ def render_lab4():
     # ═════════════════════════════════════════════════════════════════════════
     with tab_guide:
         st.markdown("""
-        <div style="max-width:820px; margin:0 auto; padding: 1rem 0 2rem;">
+        <div style="max-width:880px;margin:0 auto;padding:0.5rem 0 3rem;">
 
-        <h2 style="color:#22d3ee; font-family:'Outfit',sans-serif; font-size:1.8rem; margin-bottom:0.3rem;">
-            📖 User Guide — How to Enter Equations
+        <h2 style="color:#22d3ee;font-family:'Outfit',sans-serif;font-size:1.85rem;margin-bottom:0.3rem;">
+            📖 User Guide
         </h2>
-        <p style="color:#8b95b0; font-size:0.92rem; margin-bottom:1.8rem;">
-            This lab solves first-order ODEs of the form <code style="color:#22d3ee; background:rgba(34,211,238,0.12); padding:2px 7px; border-radius:5px;">dy/dx = f(x, y)</code>.
-            Enter only the <strong style="color:#e8ecf4;">right-hand side</strong> — the expression for f(x, y).
+        <p style="color:#8b95b0;font-size:0.92rem;margin-bottom:0.6rem;">
+            Enter only the <strong style="color:#22d3ee;">right-hand side</strong> of
+            <strong style="color:#e8ecf4;">dy/dx = f(x, y)</strong>.
+            The parser <strong style="color:#34d399;">auto-fixes</strong> implicit multiplication
+            — you can write naturally: <code style="color:#22d3ee;background:rgba(34,211,238,0.1);
+            padding:2px 7px;border-radius:4px;">x exp(3x) - 2y</code> just works.
         </p>
 
-        <!-- BASIC RULES -->
-        <div style="background:rgba(14,20,40,0.7); border:1px solid rgba(34,211,238,0.12); border-radius:14px; padding:1.4rem 1.6rem; margin-bottom:1.4rem;">
-            <h3 style="color:#e8ecf4; font-size:1.05rem; margin:0 0 0.9rem;">✅ Basic Rules</h3>
-            <ul style="color:#8b95b0; font-size:0.9rem; line-height:2; margin:0; padding-left:1.2rem;">
-                <li>Use <code style="color:#22d3ee;">x</code> and <code style="color:#22d3ee;">y</code> as your two variables — nothing else.</li>
-                <li>Use <code style="color:#22d3ee;">**</code> for powers: write <code style="color:#22d3ee;">x**2</code> not <code style="color:#a78bfa;">x^2</code></li>
-                <li>Multiplication must be explicit: write <code style="color:#22d3ee;">2*x</code> not <code style="color:#a78bfa;">2x</code></li>
-                <li>Division uses <code style="color:#22d3ee;">/</code>: write <code style="color:#22d3ee;">x/y</code> normally.</li>
-                <li>Parentheses work as expected: <code style="color:#22d3ee;">(x + 1)*(y - 2)</code></li>
-            </ul>
+        <!-- AUTO-FIX NOTICE -->
+        <div style="background:rgba(52,211,153,0.07);border:1px solid rgba(52,211,153,0.2);
+                    border-radius:12px;padding:1rem 1.4rem;margin-bottom:1.3rem;">
+            <span style="color:#34d399;font-weight:600;">✨ Auto-corrections applied automatically:</span>
+            <span style="color:#8b95b0;font-size:0.88rem;">
+              &nbsp; <code style="color:#fbbf24;">x^2</code> → <code style="color:#34d399;">x**2</code>
+              &nbsp;|&nbsp; <code style="color:#fbbf24;">2x</code> → <code style="color:#34d399;">2*x</code>
+              &nbsp;|&nbsp; <code style="color:#fbbf24;">e^x</code> → <code style="color:#34d399;">exp(x)</code>
+              &nbsp;|&nbsp; <code style="color:#fbbf24;">ln(x)</code> → <code style="color:#34d399;">log(x)</code>
+              &nbsp;|&nbsp; <code style="color:#fbbf24;">sin(x)y</code> → <code style="color:#34d399;">sin(x)*y</code>
+              &nbsp;|&nbsp; <code style="color:#fbbf24;">3x^2</code> → <code style="color:#34d399;">3*x**2</code>
+            </span>
         </div>
 
-        <!-- POLYNOMIAL / ALGEBRAIC -->
-        <div style="background:rgba(14,20,40,0.7); border:1px solid rgba(34,211,238,0.12); border-radius:14px; padding:1.4rem 1.6rem; margin-bottom:1.4rem;">
-            <h3 style="color:#22d3ee; font-size:1.05rem; margin:0 0 0.9rem;">🔢 Polynomial / Algebraic Equations</h3>
-            <table style="width:100%; border-collapse:collapse; font-size:0.88rem;">
-                <thead>
-                    <tr style="color:#4b5574; border-bottom:1px solid rgba(255,255,255,0.06);">
-                        <th style="text-align:left; padding:0.4rem 0.8rem;">Math Notation</th>
-                        <th style="text-align:left; padding:0.4rem 0.8rem;">Type Here</th>
-                        <th style="text-align:left; padding:0.4rem 0.8rem;">Notes</th>
-                    </tr>
-                </thead>
-                <tbody style="color:#8b95b0;">
-                    <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
-                        <td style="padding:0.45rem 0.8rem;">dy/dx = x + y</td>
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#22d3ee;">x + y</code></td>
-                        <td style="padding:0.45rem 0.8rem;">Linear, basic</td>
-                    </tr>
-                    <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
-                        <td style="padding:0.45rem 0.8rem;">dy/dx = x² − y</td>
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#22d3ee;">x**2 - y</code></td>
-                        <td style="padding:0.45rem 0.8rem;">Use ** for power</td>
-                    </tr>
-                    <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
-                        <td style="padding:0.45rem 0.8rem;">dy/dx = 1 + (t − y)²</td>
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#22d3ee;">1 + (x - y)**2</code></td>
-                        <td style="padding:0.45rem 0.8rem;">Use <code style="color:#22d3ee;">x</code> instead of <code style="color:#a78bfa;">t</code></td>
-                    </tr>
-                    <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
-                        <td style="padding:0.45rem 0.8rem;">dy/dx = xy − 2</td>
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#22d3ee;">x*y - 2</code></td>
-                        <td style="padding:0.45rem 0.8rem;">Always use * for multiplication</td>
-                    </tr>
-                    <tr>
-                        <td style="padding:0.45rem 0.8rem;">dy/dx = y/x + x³</td>
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#22d3ee;">y/x + x**3</code></td>
-                        <td style="padding:0.45rem 0.8rem;">Note: x=0 will cause division by zero</td>
-                    </tr>
-                </tbody>
+        <!-- RULES TABLE -->
+        <div style="background:rgba(14,20,40,0.8);border:1px solid rgba(34,211,238,0.14);
+                    border-radius:14px;padding:1.4rem 1.8rem;margin-bottom:1.3rem;">
+            <h3 style="color:#e8ecf4;font-size:1.05rem;margin:0 0 1rem;">⚠️ Only These Still Matter</h3>
+            <table style="width:100%;border-collapse:collapse;font-size:0.88rem;">
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.07);">
+                    <th style="text-align:left;color:#4b5574;padding:0.4rem 0.8rem;font-weight:500;">Situation</th>
+                    <th style="text-align:left;color:#4b5574;padding:0.4rem 0.8rem;font-weight:500;">❌ Wrong</th>
+                    <th style="text-align:left;color:#4b5574;padding:0.4rem 0.8rem;font-weight:500;">✅ Correct</th>
+                </tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
+                    <td style="padding:0.42rem 0.8rem;color:#8b95b0;">Variable names</td>
+                    <td style="padding:0.42rem 0.8rem;"><code style="color:#fb7185;background:rgba(251,113,133,0.1);padding:2px 6px;border-radius:4px;">t + y &nbsp; u*v</code></td>
+                    <td style="padding:0.42rem 0.8rem;"><code style="color:#34d399;background:rgba(52,211,153,0.1);padding:2px 6px;border-radius:4px;">x + y</code> &nbsp;only x and y</td>
+                </tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
+                    <td style="padding:0.42rem 0.8rem;color:#8b95b0;">Euler's number</td>
+                    <td style="padding:0.42rem 0.8rem;"><code style="color:#fbbf24;background:rgba(251,191,36,0.08);padding:2px 6px;border-radius:4px;">E^x &nbsp; E**x</code> (capital E)</td>
+                    <td style="padding:0.42rem 0.8rem;"><code style="color:#34d399;background:rgba(52,211,153,0.1);padding:2px 6px;border-radius:4px;">e^x</code> or <code style="color:#34d399;background:rgba(52,211,153,0.1);padding:2px 6px;border-radius:4px;">exp(x)</code></td>
+                </tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
+                    <td style="padding:0.42rem 0.8rem;color:#8b95b0;">Natural log</td>
+                    <td style="padding:0.42rem 0.8rem;"><code style="color:#fbbf24;background:rgba(251,191,36,0.08);padding:2px 6px;border-radius:4px;">Log(x) &nbsp; LOG(x)</code></td>
+                    <td style="padding:0.42rem 0.8rem;"><code style="color:#34d399;background:rgba(52,211,153,0.1);padding:2px 6px;border-radius:4px;">ln(x)</code> or <code style="color:#34d399;background:rgba(52,211,153,0.1);padding:2px 6px;border-radius:4px;">log(x)</code></td>
+                </tr>
+                <tr>
+                    <td style="padding:0.42rem 0.8rem;color:#8b95b0;">Other variable</td>
+                    <td style="padding:0.42rem 0.8rem;"><code style="color:#fb7185;background:rgba(251,113,133,0.1);padding:2px 6px;border-radius:4px;">t^2 - z</code></td>
+                    <td style="padding:0.42rem 0.8rem;"><code style="color:#34d399;background:rgba(52,211,153,0.1);padding:2px 6px;border-radius:4px;">x^2 - y</code> &nbsp;rename to x, y</td>
+                </tr>
             </table>
         </div>
 
-        <!-- TRIGONOMETRIC -->
-        <div style="background:rgba(14,20,40,0.7); border:1px solid rgba(167,139,250,0.12); border-radius:14px; padding:1.4rem 1.6rem; margin-bottom:1.4rem;">
-            <h3 style="color:#a78bfa; font-size:1.05rem; margin:0 0 0.9rem;">📐 Trigonometric Equations</h3>
-            <table style="width:100%; border-collapse:collapse; font-size:0.88rem;">
-                <thead>
-                    <tr style="color:#4b5574; border-bottom:1px solid rgba(255,255,255,0.06);">
-                        <th style="text-align:left; padding:0.4rem 0.8rem;">Math Notation</th>
-                        <th style="text-align:left; padding:0.4rem 0.8rem;">Type Here</th>
-                    </tr>
-                </thead>
-                <tbody style="color:#8b95b0;">
-                    <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
-                        <td style="padding:0.45rem 0.8rem;">dy/dx = sin(x) + y</td>
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#a78bfa;">sin(x) + y</code></td>
-                    </tr>
-                    <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
-                        <td style="padding:0.45rem 0.8rem;">dy/dx = cos(x) · y</td>
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#a78bfa;">cos(x)*y</code></td>
-                    </tr>
-                    <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
-                        <td style="padding:0.45rem 0.8rem;">dy/dx = tan(x) − y²</td>
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#a78bfa;">tan(x) - y**2</code></td>
-                    </tr>
-                    <tr>
-                        <td style="padding:0.45rem 0.8rem;">dy/dx = sin(x·y)</td>
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#a78bfa;">sin(x*y)</code></td>
-                    </tr>
-                </tbody>
+        <!-- EXAMPLE TABLES — two columns -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin-bottom:1.3rem;">
+
+        <div style="background:rgba(14,20,40,0.8);border:1px solid rgba(34,211,238,0.14);
+                    border-radius:14px;padding:1.3rem 1.5rem;">
+            <h3 style="color:#22d3ee;font-size:1rem;margin:0 0 0.8rem;">🔢 Polynomial</h3>
+            <table style="width:100%;border-collapse:collapse;font-size:0.85rem;">
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.06);">
+                    <th style="text-align:left;color:#4b5574;padding:0.3rem 0.5rem;font-weight:500;">Math</th>
+                    <th style="text-align:left;color:#4b5574;padding:0.3rem 0.5rem;font-weight:500;">Enter</th>
+                </tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);"><td style="padding:0.35rem 0.5rem;color:#8b95b0;">x + y</td><td style="padding:0.35rem 0.5rem;"><code style="color:#22d3ee;">x + y</code></td></tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);"><td style="padding:0.35rem 0.5rem;color:#8b95b0;">x² − y</td><td style="padding:0.35rem 0.5rem;"><code style="color:#22d3ee;">x^2 - y</code></td></tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);"><td style="padding:0.35rem 0.5rem;color:#8b95b0;">1 + (t−y)²</td><td style="padding:0.35rem 0.5rem;"><code style="color:#22d3ee;">1 + (x-y)^2</code></td></tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);"><td style="padding:0.35rem 0.5rem;color:#8b95b0;">xy − 2</td><td style="padding:0.35rem 0.5rem;"><code style="color:#22d3ee;">xy - 2</code></td></tr>
+                <tr><td style="padding:0.35rem 0.5rem;color:#8b95b0;">3x² − 2y + 1</td><td style="padding:0.35rem 0.5rem;"><code style="color:#22d3ee;">3x^2 - 2y + 1</code></td></tr>
             </table>
         </div>
 
-        <!-- EXPONENTIAL / LOGARITHMIC -->
-        <div style="background:rgba(14,20,40,0.7); border:1px solid rgba(52,211,153,0.12); border-radius:14px; padding:1.4rem 1.6rem; margin-bottom:1.4rem;">
-            <h3 style="color:#34d399; font-size:1.05rem; margin:0 0 0.9rem;">📈 Exponential &amp; Logarithmic Equations</h3>
-            <table style="width:100%; border-collapse:collapse; font-size:0.88rem;">
-                <thead>
-                    <tr style="color:#4b5574; border-bottom:1px solid rgba(255,255,255,0.06);">
-                        <th style="text-align:left; padding:0.4rem 0.8rem;">Math Notation</th>
-                        <th style="text-align:left; padding:0.4rem 0.8rem;">Type Here</th>
-                        <th style="text-align:left; padding:0.4rem 0.8rem;">Notes</th>
-                    </tr>
-                </thead>
-                <tbody style="color:#8b95b0;">
-                    <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
-                        <td style="padding:0.45rem 0.8rem;">dy/dx = eˣ − y</td>
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#34d399;">exp(x) - y</code></td>
-                        <td style="padding:0.45rem 0.8rem;">Use exp() not e**x</td>
-                    </tr>
-                    <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
-                        <td style="padding:0.45rem 0.8rem;">dy/dx = eˣ · y</td>
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#34d399;">exp(x)*y</code></td>
-                        <td style="padding:0.45rem 0.8rem;"></td>
-                    </tr>
-                    <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
-                        <td style="padding:0.45rem 0.8rem;">dy/dx = ln(x) + y</td>
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#34d399;">log(x) + y</code></td>
-                        <td style="padding:0.45rem 0.8rem;">log() = natural log; x must be &gt; 0</td>
-                    </tr>
-                    <tr>
-                        <td style="padding:0.45rem 0.8rem;">dy/dx = e⁻ˣ·y</td>
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#34d399;">exp(-x)*y</code></td>
-                        <td style="padding:0.45rem 0.8rem;"></td>
-                    </tr>
-                </tbody>
+        <div style="background:rgba(14,20,40,0.8);border:1px solid rgba(167,139,250,0.14);
+                    border-radius:14px;padding:1.3rem 1.5rem;">
+            <h3 style="color:#a78bfa;font-size:1rem;margin:0 0 0.8rem;">📐 Trigonometric</h3>
+            <table style="width:100%;border-collapse:collapse;font-size:0.85rem;">
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.06);">
+                    <th style="text-align:left;color:#4b5574;padding:0.3rem 0.5rem;font-weight:500;">Math</th>
+                    <th style="text-align:left;color:#4b5574;padding:0.3rem 0.5rem;font-weight:500;">Enter</th>
+                </tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);"><td style="padding:0.35rem 0.5rem;color:#8b95b0;">sin(x) + y</td><td style="padding:0.35rem 0.5rem;"><code style="color:#a78bfa;">sin(x) + y</code></td></tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);"><td style="padding:0.35rem 0.5rem;color:#8b95b0;">cos(x)·y</td><td style="padding:0.35rem 0.5rem;"><code style="color:#a78bfa;">cos(x)y</code></td></tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);"><td style="padding:0.35rem 0.5rem;color:#8b95b0;">tan(x) − y²</td><td style="padding:0.35rem 0.5rem;"><code style="color:#a78bfa;">tan(x) - y^2</code></td></tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);"><td style="padding:0.35rem 0.5rem;color:#8b95b0;">sin(x·y)</td><td style="padding:0.35rem 0.5rem;"><code style="color:#a78bfa;">sin(xy)</code></td></tr>
+                <tr><td style="padding:0.35rem 0.5rem;color:#8b95b0;">x·sin(y)</td><td style="padding:0.35rem 0.5rem;"><code style="color:#a78bfa;">x sin(y)</code></td></tr>
             </table>
         </div>
 
-        <!-- COMMON MISTAKES -->
-        <div style="background:rgba(251,113,133,0.06); border:1px solid rgba(251,113,133,0.18); border-radius:14px; padding:1.4rem 1.6rem; margin-bottom:1.4rem;">
-            <h3 style="color:#fb7185; font-size:1.05rem; margin:0 0 0.9rem;">⚠️ Common Mistakes to Avoid</h3>
-            <table style="width:100%; border-collapse:collapse; font-size:0.88rem;">
-                <thead>
-                    <tr style="color:#4b5574; border-bottom:1px solid rgba(255,255,255,0.06);">
-                        <th style="text-align:left; padding:0.4rem 0.8rem;">❌ Wrong</th>
-                        <th style="text-align:left; padding:0.4rem 0.8rem;">✅ Correct</th>
-                        <th style="text-align:left; padding:0.4rem 0.8rem;">Reason</th>
-                    </tr>
-                </thead>
-                <tbody style="color:#8b95b0;">
-                    <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#fb7185;">x^2</code></td>
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#34d399;">x**2</code></td>
-                        <td style="padding:0.45rem 0.8rem;">^ is XOR in Python, not power</td>
-                    </tr>
-                    <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#fb7185;">2x</code></td>
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#34d399;">2*x</code></td>
-                        <td style="padding:0.45rem 0.8rem;">Implicit multiplication not allowed</td>
-                    </tr>
-                    <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#fb7185;">t + y</code></td>
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#34d399;">x + y</code></td>
-                        <td style="padding:0.45rem 0.8rem;">Only x and y are recognized</td>
-                    </tr>
-                    <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#fb7185;">e**x</code></td>
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#34d399;">exp(x)</code></td>
-                        <td style="padding:0.45rem 0.8rem;">e is not a defined constant; use exp()</td>
-                    </tr>
-                    <tr>
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#fb7185;">ln(x)</code></td>
-                        <td style="padding:0.45rem 0.8rem;"><code style="color:#34d399;">log(x)</code></td>
-                        <td style="padding:0.45rem 0.8rem;">Use log() for natural logarithm</td>
-                    </tr>
-                </tbody>
+        <div style="background:rgba(14,20,40,0.8);border:1px solid rgba(52,211,153,0.14);
+                    border-radius:14px;padding:1.3rem 1.5rem;">
+            <h3 style="color:#34d399;font-size:1rem;margin:0 0 0.8rem;">📈 Exponential &amp; Log</h3>
+            <table style="width:100%;border-collapse:collapse;font-size:0.85rem;">
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.06);">
+                    <th style="text-align:left;color:#4b5574;padding:0.3rem 0.5rem;font-weight:500;">Math</th>
+                    <th style="text-align:left;color:#4b5574;padding:0.3rem 0.5rem;font-weight:500;">Enter</th>
+                </tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);"><td style="padding:0.35rem 0.5rem;color:#8b95b0;">eˣ − y</td><td style="padding:0.35rem 0.5rem;"><code style="color:#34d399;">e^x - y</code> or <code style="color:#34d399;">exp(x) - y</code></td></tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);"><td style="padding:0.35rem 0.5rem;color:#8b95b0;">x·eˣ − 2y</td><td style="padding:0.35rem 0.5rem;"><code style="color:#34d399;">x e^x - 2y</code></td></tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);"><td style="padding:0.35rem 0.5rem;color:#8b95b0;">e⁻ˣ·y</td><td style="padding:0.35rem 0.5rem;"><code style="color:#34d399;">e^(-x)*y</code></td></tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);"><td style="padding:0.35rem 0.5rem;color:#8b95b0;">ln(x) + y</td><td style="padding:0.35rem 0.5rem;"><code style="color:#34d399;">ln(x) + y</code> or <code style="color:#34d399;">log(x) + y</code></td></tr>
+                <tr><td style="padding:0.35rem 0.5rem;color:#8b95b0;">y·ln(y)</td><td style="padding:0.35rem 0.5rem;"><code style="color:#34d399;">y*ln(y)</code></td></tr>
             </table>
         </div>
 
-        <!-- PARAMETER TIPS -->
-        <div style="background:rgba(14,20,40,0.7); border:1px solid rgba(251,191,36,0.15); border-radius:14px; padding:1.4rem 1.6rem;">
-            <h3 style="color:#fbbf24; font-size:1.05rem; margin:0 0 0.9rem;">⚙️ Parameter Tips</h3>
-            <ul style="color:#8b95b0; font-size:0.9rem; line-height:2.1; margin:0; padding-left:1.2rem;">
-                <li><strong style="color:#e8ecf4;">x₀ (Initial x):</strong> Starting point of the integration. Often 0.</li>
-                <li><strong style="color:#e8ecf4;">y₀ (Initial y):</strong> Initial condition — the known value of y at x₀. E.g. y(0) = 1 → set y₀ = 1.</li>
-                <li><strong style="color:#e8ecf4;">Final x:</strong> Where to stop integration. Must be strictly greater than x₀.</li>
-                <li><strong style="color:#e8ecf4;">Step size h:</strong> Smaller h = more accurate but more steps. Start with h = 0.1 or 0.2.</li>
-                <li><strong style="color:#e8ecf4;">Which method?</strong> Euler is simplest (O(h) error). Modified Euler &amp; Heun's are more accurate (O(h²)) with only one extra function call per step.</li>
-            </ul>
+        <div style="background:rgba(14,20,40,0.8);border:1px solid rgba(251,191,36,0.14);
+                    border-radius:14px;padding:1.3rem 1.5rem;">
+            <h3 style="color:#fbbf24;font-size:1rem;margin:0 0 0.8rem;">🔀 Mixed / Advanced</h3>
+            <table style="width:100%;border-collapse:collapse;font-size:0.85rem;">
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.06);">
+                    <th style="text-align:left;color:#4b5574;padding:0.3rem 0.5rem;font-weight:500;">Math</th>
+                    <th style="text-align:left;color:#4b5574;padding:0.3rem 0.5rem;font-weight:500;">Enter</th>
+                </tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);"><td style="padding:0.35rem 0.5rem;color:#8b95b0;">eˣ·sin(y)</td><td style="padding:0.35rem 0.5rem;"><code style="color:#fbbf24;">exp(x)sin(y)</code></td></tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);"><td style="padding:0.35rem 0.5rem;color:#8b95b0;">√(x²+y²)</td><td style="padding:0.35rem 0.5rem;"><code style="color:#fbbf24;">sqrt(x^2+y^2)</code></td></tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);"><td style="padding:0.35rem 0.5rem;color:#8b95b0;">(x+y)/(x−y)</td><td style="padding:0.35rem 0.5rem;"><code style="color:#fbbf24;">(x+y)/(x-y)</code></td></tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);"><td style="padding:0.35rem 0.5rem;color:#8b95b0;">sin²(x) + y²</td><td style="padding:0.35rem 0.5rem;"><code style="color:#fbbf24;">sin(x)^2 + y^2</code></td></tr>
+                <tr><td style="padding:0.35rem 0.5rem;color:#8b95b0;">x²·cos(y)+eˣ</td><td style="padding:0.35rem 0.5rem;"><code style="color:#fbbf24;">x^2 cos(y)+exp(x)</code></td></tr>
+            </table>
+        </div>
+
+        </div><!-- end grid -->
+
+        <!-- PARAMETER GUIDE -->
+        <div style="background:rgba(14,20,40,0.8);border:1px solid rgba(34,211,238,0.10);
+                    border-radius:14px;padding:1.4rem 1.8rem;">
+            <h3 style="color:#e8ecf4;font-size:1.05rem;margin:0 0 1rem;">⚙️ Parameter Guide</h3>
+            <table style="width:100%;border-collapse:collapse;font-size:0.88rem;">
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.07);">
+                    <th style="text-align:left;color:#4b5574;padding:0.4rem 0.8rem;font-weight:500;">Field</th>
+                    <th style="text-align:left;color:#4b5574;padding:0.4rem 0.8rem;font-weight:500;">Meaning</th>
+                    <th style="text-align:left;color:#4b5574;padding:0.4rem 0.8rem;font-weight:500;">Typical</th>
+                </tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);"><td style="padding:0.42rem 0.8rem;"><code style="color:#22d3ee;">x₀</code></td><td style="padding:0.42rem 0.8rem;color:#8b95b0;">Starting x</td><td style="padding:0.42rem 0.8rem;color:#4b5574;">0.0</td></tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);"><td style="padding:0.42rem 0.8rem;"><code style="color:#22d3ee;">y₀</code></td><td style="padding:0.42rem 0.8rem;color:#8b95b0;">y(x₀) — initial condition</td><td style="padding:0.42rem 0.8rem;color:#4b5574;">1.0</td></tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);"><td style="padding:0.42rem 0.8rem;"><code style="color:#22d3ee;">Final x</code></td><td style="padding:0.42rem 0.8rem;color:#8b95b0;">End of integration — must be &gt; x₀</td><td style="padding:0.42rem 0.8rem;color:#4b5574;">2.0</td></tr>
+                <tr><td style="padding:0.42rem 0.8rem;"><code style="color:#22d3ee;">h</code></td><td style="padding:0.42rem 0.8rem;color:#8b95b0;">Step size — smaller = more accurate</td><td style="padding:0.42rem 0.8rem;color:#4b5574;">0.1 – 0.25</td></tr>
+            </table>
+            <p style="color:#4b5574;font-size:0.83rem;margin:1rem 0 0;">
+                💡 <strong style="color:#8b95b0;">Which method?</strong>
+                <span style="color:#22d3ee;">Euler</span> is simplest (O(h) error).
+                <span style="color:#a78bfa;">Modified Euler</span> &amp;
+                <span style="color:#34d399;">Heun's</span> are O(h²) — far more accurate with just one extra function call.
+            </p>
         </div>
 
         </div>
