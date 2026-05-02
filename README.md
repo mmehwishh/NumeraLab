@@ -1,6 +1,7 @@
 
 # 📊 Scientific Programming Web App
-_Group Member : Mehwish Zehra_ |  _Arfeen_ \
+_Group Member : Mehwish Zehra_ |  _Arfeen_ 
+<br>
 
 An interactive **Scientific Programming Web Application** built using Python and Streamlit to solve and visualize core numerical methods.
 
