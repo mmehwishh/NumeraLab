@@ -1,6 +1,7 @@
 
 # 📊 Scientific Programming Web App
 **_Group Members : Mehwish Zehra_** **|**  **_Arfeen_** 
+**Live :** **https://numeralab.streamlit.app/** 
 <br>
 
 An interactive **Scientific Programming Web Application** built using Python and Streamlit to solve and visualize core numerical methods.
